@@ -74,18 +74,16 @@ class Base(ABC):
         ``vector_similarity`` are preserved.
 
         Out-of-range output (e.g. NVIDIA's unbounded, often negative logits)
-        is mapped via a centred sigmoid — shift each score to the batch
-        midpoint, then squash to ``(0, 1)``. This replaces the previous min-max
-        stretch, which mapped any ``[min, max]`` onto the full ``[0, 1]``
-        regardless of the batch's absolute distance from zero — so a
-        uniformly-weak batch like ``[-1.0, -1.5, -2.0]`` landed at
-        ``[1.0, 0.5, 0.0]`` and let a single "least-bad" chunk dominate the
-        ``tkweight * tksim + vtweight * vtsim`` blend despite no chunk actually
-        matching strongly. Centring keeps absolute confidence meaningful:
-        a uniformly-weak batch now lands around ``[0.62, 0.50, 0.38]``
-        rather than ``[1.0, 0.5, 0.0]``, and a tight cluster well above zero
-        lands firmly above ``0.5`` to reflect real absolute confidence.
-        Ordering within the batch is preserved (sigmoid is monotone).
+        is mapped via a centred sigmoid normalised by the batch span —
+        centre each score on the batch midpoint, divide the offset by the
+        span, then squash to ``(0, 1)``. Dividing by the span makes the
+        normalisation invariant to the batch's absolute magnitude, so wide
+        uniformly-weak logits like ``[-10, -20, -30]`` cannot manufacture
+        near-``1.0`` confidence from a "least-bad" top — which the previous
+        min-max stretch did because any spread was implicitly mapped onto the
+        full ``[0, 1]``. A tight cluster well above zero still maps firmly
+        above ``0.5`` to reflect real absolute confidence. Ordering within
+        the batch is preserved (sigmoid is monotone).
 
         A spreadless out-of-range batch (including a single candidate) has
         no relative signal and is clamped to the natural endpoint, so a lone
@@ -98,12 +96,11 @@ class Base(ABC):
 
         if min_rank >= 0.0 and max_rank <= 1.0:
             return rank
-        if max_rank - min_rank < 1e-3:
+        span = max_rank - min_rank
+        if span < 1e-3:
             return np.clip(rank, 0.0, 1.0)
-        # Centre on the batch midpoint, then squash. Min-max stretch was
-        # replaced because it produced [1.0, ...] for uniformly-weak batches,
-        # which manufactured false top-confidence under vtweight=0.7.
-        return 1.0 / (1.0 + np.exp(-(rank - (min_rank + max_rank) / 2.0)))
+        midpoint = (min_rank + max_rank) / 2.0
+        return 1.0 / (1.0 + np.exp(-(rank - midpoint) / span))
 
 
 class JinaRerank(Base):
