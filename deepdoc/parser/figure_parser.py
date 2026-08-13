@@ -47,6 +47,9 @@ def vision_figure_parser_figure_data_wrapper(figures_data_without_positions):
 
 
 def vision_figure_parser_docx_wrapper(sections, tbls, callback=None, lang="English", **kwargs):
+    # Normalize empty/None `lang` to the default — otherwise the empty string
+    # is forwarded to LLMBundle / VisionFigureParser and bypasses the default.
+    lang = lang or "English"
     if not sections:
         return tbls
     try:
@@ -72,6 +75,7 @@ def vision_figure_parser_docx_wrapper(sections, tbls, callback=None, lang="Engli
 
 
 def vision_figure_parser_figure_xlsx_wrapper(images, callback=None, lang="English", **kwargs):
+    lang = lang or "English"
     tbls = []
     if not images:
         return []
@@ -110,6 +114,7 @@ def vision_figure_parser_figure_xlsx_wrapper(images, callback=None, lang="Englis
 
 
 def vision_figure_parser_pdf_wrapper(tbls, callback=None, lang="English", **kwargs):
+    lang = lang or "English"
     if not tbls:
         return []
     sections = kwargs.get("sections")
@@ -153,6 +158,7 @@ def vision_figure_parser_pdf_wrapper(tbls, callback=None, lang="English", **kwar
 
 
 def vision_figure_parser_docx_wrapper_naive(chunks, idx_lst, callback=None, lang="English", **kwargs):
+    lang = lang or "English"
     if not chunks:
         return []
     try:

@@ -240,6 +240,25 @@ class TestDocxWrapperForwardsLang:
         assert lang_seen["llm_lang"] == "English"
         assert parser_calls[0]["lang"] == "English"
 
+    def test_empty_string_lang_falls_back_to_english(self, monkeypatch):
+        from deepdoc.parser.figure_parser import vision_figure_parser_docx_wrapper
+
+        lang_seen: dict = {}
+        parser_calls: list = []
+        _install_vision_mocks(monkeypatch, lang_seen)
+        _install_vision_parser_recorder(monkeypatch, parser_calls)
+
+        vision_figure_parser_docx_wrapper(
+            sections=[("text-only", None)],
+            tbls=[],
+            callback=lambda *_a, **_k: None,
+            lang="",
+            tenant_id="stub-tenant",
+        )
+
+        assert lang_seen["llm_lang"] == "English"
+        assert parser_calls[0]["lang"] == "English"
+
 
 class TestXlsxWrapperForwardsLang:
     """``vision_figure_parser_figure_xlsx_wrapper`` (used by ``rag.app.table``
@@ -270,6 +289,25 @@ class TestXlsxWrapperForwardsLang:
         assert lang_seen["llm_lang"] == "Japanese"
         assert parser_calls[0]["lang"] == "Japanese"
 
+    def test_empty_string_lang_falls_back_to_english(self, monkeypatch):
+        from deepdoc.parser.figure_parser import vision_figure_parser_figure_xlsx_wrapper
+
+        lang_seen: dict = {}
+        parser_calls: list = []
+        _install_vision_mocks(monkeypatch, lang_seen)
+        _install_vision_parser_recorder(monkeypatch, parser_calls)
+
+        with patch("deepdoc.parser.figure_parser.ensure_pil_image", return_value=MagicMock(name="PIL.Image")):
+            vision_figure_parser_figure_xlsx_wrapper(
+                images=[{"image": b"fake-bytes", "image_description": "stub"}],
+                callback=lambda *_a, **_k: None,
+                lang="",
+                tenant_id="stub-tenant",
+            )
+
+        assert lang_seen["llm_lang"] == "English"
+        assert parser_calls[0]["lang"] == "English"
+
 
 class TestPdfWrapperForwardsLang:
     """``vision_figure_parser_pdf_wrapper`` (used by ``rag.app.naive`` for
@@ -296,6 +334,27 @@ class TestPdfWrapperForwardsLang:
                 tbls=tbls,
                 callback=lambda *_a, **_k: None,
                 lang="English",
+                tenant_id="stub-tenant",
+            )
+
+        assert lang_seen["llm_lang"] == "English"
+        assert parser_calls[0]["lang"] == "English"
+
+    def test_empty_string_lang_falls_back_to_english(self, monkeypatch):
+        from deepdoc.parser.figure_parser import vision_figure_parser_pdf_wrapper
+
+        lang_seen: dict = {}
+        parser_calls: list = []
+        _install_vision_mocks(monkeypatch, lang_seen)
+        _install_vision_parser_recorder(monkeypatch, parser_calls)
+
+        fake_image = MagicMock(name="PIL.Image")
+        tbls = [((fake_image, ["stub-desc"]), [(0, 0, 0, 0, 0)])]
+        with patch("deepdoc.parser.figure_parser.is_image_like", return_value=True):
+            vision_figure_parser_pdf_wrapper(
+                tbls=tbls,
+                callback=lambda *_a, **_k: None,
+                lang="",
                 tenant_id="stub-tenant",
             )
 
@@ -420,6 +479,58 @@ class TestNaiveDocxWrapperForwardsLang:
 
         assert lang_seen["llm_lang"] == "Japanese"
         assert captured["context_language"] == "Japanese"
+
+    def test_empty_string_lang_falls_back_to_english(self, monkeypatch):
+        from deepdoc.parser.figure_parser import vision_figure_parser_docx_wrapper_naive
+
+        lang_seen: dict = {}
+        captured: dict = {}
+        _install_vision_mocks(monkeypatch, lang_seen)
+
+        def fake_default_prompt(*args, **kwargs):
+            captured["default_language"] = kwargs.get("language")
+            return "stub-prompt"
+
+        def fake_context_prompt(*args, **kwargs):
+            captured["context_language"] = kwargs.get("language")
+            return "stub-prompt"
+
+        monkeypatch.setattr(
+            "deepdoc.parser.figure_parser.vision_llm_figure_describe_prompt",
+            fake_default_prompt,
+        )
+        monkeypatch.setattr(
+            "deepdoc.parser.figure_parser.vision_llm_figure_describe_prompt_with_context",
+            fake_context_prompt,
+        )
+        monkeypatch.setattr(
+            "deepdoc.parser.figure_parser.picture_vision_llm_chunk",
+            lambda *a, **k: "stub-description",
+        )
+
+        from PIL import Image
+
+        fake_img = MagicMock(spec=Image.Image)
+        monkeypatch.setattr(
+            "deepdoc.parser.figure_parser.open_image_for_processing",
+            lambda *_a, **_k: (fake_img, False),
+        )
+
+        chunks = [
+            {"text": "caption", "image": b"fake-bytes", "context_above": "", "context_below": ""},
+        ]
+
+        vision_figure_parser_docx_wrapper_naive(
+            chunks=chunks,
+            idx_lst=[0],
+            callback=lambda *_a, **_k: None,
+            lang="",
+            tenant_id="stub-tenant",
+        )
+
+        # The empty string must not propagate to LLMBundle or the prompts.
+        assert lang_seen["llm_lang"] == "English"
+        assert captured["default_language"] == "English"
 
 
 # --------------------------------------------------------------------------- #
