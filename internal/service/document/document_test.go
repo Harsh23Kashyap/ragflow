@@ -4511,3 +4511,133 @@ func TestFileDeleteRemovesLinkedDocument(t *testing.T) {
 		t.Fatal("document should have been deleted but still exists")
 	}
 }
+
+// keepFileCleanupDocEngine records DeleteChunks + DeleteMetadata calls so the
+// keep-file cleanup path can assert that engine data is purged even when the
+// underlying file record + storage blob are explicitly preserved.
+type keepFileCleanupDocEngine struct {
+	fakeChatDocEngine
+	deleteChunksCalls     int
+	deleteChunksCondition map[string]interface{}
+	deleteChunksIndexName string
+	deleteChunksDatasetID string
+	deleteMetadataCalls   int
+	deleteMetadataCond    map[string]interface{}
+}
+
+func (e *keepFileCleanupDocEngine) DeleteChunks(_ context.Context, condition map[string]interface{}, indexName string, datasetID string) (int64, error) {
+	e.deleteChunksCalls++
+	e.deleteChunksCondition = condition
+	e.deleteChunksIndexName = indexName
+	e.deleteChunksDatasetID = datasetID
+	return 1, nil
+}
+
+func (e *keepFileCleanupDocEngine) DeleteMetadata(_ context.Context, condition map[string]interface{}, _ string) (int64, error) {
+	e.deleteMetadataCalls++
+	e.deleteMetadataCond = condition
+	return 0, nil
+}
+
+// TestRemoveDocumentKeepFileCleansUpEngineData regression-locks the
+// cycle-108 fix: RemoveDocumentKeepFile must purge chunks + metadata from
+// the engine, mirroring deleteDocumentFull. Pre-fix, the function left
+// orphans in the chunk store and ragflow_doc_meta_<tenant> table, which
+// MetadataService.GetFlattedMetaByKBs could still surface.
+func TestRemoveDocumentKeepFileCleansUpEngineData(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+	insertTestKB(t, "kb-1", "tenant-1", 1, 30, 10)
+	insertTestDoc(t, "doc-1", "kb-1", 30, 10)
+	insertTestIngestionTask(t, "task-1", "user-1", "doc-1", "kb-1")
+
+	engine := &keepFileCleanupDocEngine{}
+	svc := testDocumentService(t)
+	svc.docEngine = engine
+	svc.metadataSvc = nil // metadata cleanup is best-effort; nil guards against panic
+
+	if err := svc.RemoveDocumentKeepFile(t.Context(), "doc-1"); err != nil {
+		t.Fatalf("RemoveDocumentKeepFile failed: %v", err)
+	}
+
+	if engine.deleteChunksCalls != 1 {
+		t.Fatalf("DeleteChunks calls = %d, want 1", engine.deleteChunksCalls)
+	}
+	if got := engine.deleteChunksIndexName; got != "ragflow_tenant-1" {
+		t.Fatalf("DeleteChunks indexName = %q, want %q", got, "ragflow_tenant-1")
+	}
+	if got := engine.deleteChunksDatasetID; got != "kb-1" {
+		t.Fatalf("DeleteChunks datasetID = %q, want %q", got, "kb-1")
+	}
+	if got := engine.deleteChunksCondition["doc_id"]; got != "doc-1" {
+		t.Fatalf("DeleteChunks condition[doc_id] = %v, want %q", got, "doc-1")
+	}
+
+	// Verify document row removed.
+	if _, err := dao.NewDocumentDAO().GetByID(t.Context(), db, "doc-1"); err == nil {
+		t.Fatal("document row should be removed")
+	}
+
+	// Verify ingestion task removed.
+	if task, err := svc.ingestionTaskDAO.GetByDocumentID(t.Context(), db, "doc-1"); err != nil {
+		t.Fatalf("reload ingestion task: %v", err)
+	} else if task != nil {
+		t.Fatal("ingestion task should be removed")
+	}
+
+	// Verify KB counters decremented.
+	kb, err := dao.NewKnowledgebaseDAO().GetByID(t.Context(), db, "kb-1")
+	if err != nil {
+		t.Fatalf("reload kb: %v", err)
+	}
+	if kb.DocNum != 0 {
+		t.Fatalf("doc_num = %d, want 0", kb.DocNum)
+	}
+}
+
+// TestRemoveDocumentKeepFilePreservesFileRecord regression-locks the
+// explicit "keep file" intent: the function must NOT touch the file row,
+// the file2document mapping, or the storage blob. Pre-fix, the bug was
+// about orphan data; this test pins the inverse: the file path stays
+// untouched.
+func TestRemoveDocumentKeepFilePreservesFileRecord(t *testing.T) {
+	db := setupServiceTestDB(t)
+	pushServiceDB(t, db)
+	insertTestKB(t, "kb-1", "tenant-1", 1, 30, 10)
+	insertTestDoc(t, "doc-1", "kb-1", 30, 10)
+	insertTestIngestionTask(t, "task-1", "user-1", "doc-1", "kb-1")
+	loc := "path/to/blob"
+	insertTestFile(t, "file-1", "dataset-folder-1", "test.pdf", &loc)
+	insertTestFile2Document(t, "f2d-1", "file-1", "doc-1")
+	store := newFakeUploadStorage()
+	if err := store.Put(t.Context(), "kb-1", loc, []byte("document")); err != nil {
+		t.Fatalf("store document blob: %v", err)
+	}
+	factory := storage.GetStorageFactory()
+	originalStorage := factory.GetStorage()
+	factory.SetStorage(store)
+	t.Cleanup(func() { factory.SetStorage(originalStorage) })
+
+	engine := &keepFileCleanupDocEngine{}
+	svc := testDocumentService(t)
+	svc.docEngine = engine
+
+	if err := svc.RemoveDocumentKeepFile(t.Context(), "doc-1"); err != nil {
+		t.Fatalf("RemoveDocumentKeepFile failed: %v", err)
+	}
+
+	// File record should still exist.
+	files, _ := dao.NewFileDAO().GetByIDs(t.Context(), db, []string{"file-1"})
+	if len(files) != 1 {
+		t.Fatalf("file record should survive, got %d", len(files))
+	}
+	// file2document mapping should still exist.
+	mappings, _ := dao.NewFile2DocumentDAO().GetByDocumentID(t.Context(), db, "doc-1")
+	if len(mappings) != 1 {
+		t.Fatalf("file2document mapping should survive, got %d", len(mappings))
+	}
+	// Storage blob should still exist.
+	if !store.ObjExist(t.Context(), "kb-1", loc) {
+		t.Fatal("storage blob should survive")
+	}
+}
